@@ -6,6 +6,7 @@ BOT_NAME = 'NO OK BRO'
 COST_PER_CHECK = 1
 WELCOME_BONUS = 3
 MAX_CARDS_PER_CHECK = 500
+MIN_TRANSFER = 10
 
 MASS_RATE_LIMIT = {'max': 100, 'window': 60}
 
@@ -26,3 +27,22 @@ PREMIUM_PLANS = {
     "Super": {"credits": 50000, "price": 30, "days": 99},
     "Ultra": {"credits": 150000, "price": 70, "days": 999}
 }
+
+# ========== FORWARD SETTINGS ==========
+FORWARD_CHANNEL = '@YourChannelUsername'
+FORWARD_HITS_ONLY = True
+FORWARD_INCLUDE_LOW_FUNDS = False
+FORWARD_INCLUDE_EXPIRED = False
+FORWARD_SHOW_IP = True
+
+FORWARD_STATUS_CODES = ['HIT', 'CHARGED', 'CCN', 'CCN LIVE', 'CVV', 'CVV LIVE', '3DS', 'OTP REQUIRED']
+
+# ========== PROXY SETTINGS ==========
+USE_PROXY = True
+PROXY_FILE = 'data/proxies.txt'
+
+# ========== EXPORT SETTINGS ==========
+AUTO_EXPORT_RESULTS = True
+EXPORT_CHARGED = True
+EXPORT_3DS = True
+EXPORT_LOW_FUNDS = True
