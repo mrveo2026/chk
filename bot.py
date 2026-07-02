@@ -6,6 +6,7 @@ import threading
 import os
 import random
 import requests
+import sys
 from datetime import datetime
 from telebot import types
 from config import *
@@ -13,27 +14,40 @@ from database import *
 from credit_system import *
 from logger import *
 from proxy_manager import proxy_manager
-from utils.card_utils import *
-from utils.response_classifier import classify_gate_response
-from utils.rate_limiter import mass_rate_limiter
-# bot.py အပေါ်ဆုံးမှာ ထည့်ပါ
-import sys
-import os
 
-# Add current directory to Python path
+# Fix import path for flat structure
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Try folder structure first, fallback to flat
+try:
+    from utils.card_utils import *
+    from utils.response_classifier import classify_gate_response
+    from utils.rate_limiter import mass_rate_limiter
+except:
+    from card_utils import *
+    from response_classifier import classify_gate_response
+    from rate_limiter import mass_rate_limiter
+
 # ==================== GATE IMPORTS ====================
 import importlib
 
 def get_gate_module(gate_file):
+    """Dynamically import gate module"""
     try:
-        module = importlib.import_module(f'gate_modules.{gate_file}')
-        return module
+        # Try folder structure first
+        try:
+            module = importlib.import_module(f'gate_modules.{gate_file}')
+            return module
+        except:
+            # Fallback to flat structure
+            module = importlib.import_module(gate_file.replace('.py', ''))
+            return module
     except Exception as e:
         print(f"Error loading {gate_file}: {e}")
         log_error(f"Failed to load gate module {gate_file}: {e}")
         return None
 
+# Pre-load gate modules
 gate_modules = {}
 for g in ['gatet1', 'gatet2', 'gatet3', 'gatet4', 'gatet5', 'gatetHB']:
     mod = get_gate_module(g)
@@ -182,13 +196,11 @@ def forward_card_result(chat_id, card, result, gate_name, amount, elapsed, usern
 
 # ==================== EXPORT RESULTS ====================
 def export_card_results(user_id, username, results, gate_name):
-    """Export card results to files and send to user"""
     try:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         export_dir = f'data/exports/{user_id}'
         os.makedirs(export_dir, exist_ok=True)
         
-        # Separate results by status
         charged_cards = []
         otp_cards = []
         low_funds_cards = []
@@ -210,7 +222,6 @@ def export_card_results(user_id, username, results, gate_name):
         
         files_to_send = []
         
-        # All results
         if all_cards:
             all_file = f'{export_dir}/all_results_{timestamp}.txt'
             with open(all_file, 'w') as f:
@@ -222,7 +233,6 @@ def export_card_results(user_id, username, results, gate_name):
                     f.write(f"{card}\n")
             files_to_send.append(('📋 All Results', all_file))
         
-        # Charged cards
         if charged_cards and EXPORT_CHARGED:
             charged_file = f'{export_dir}/charged_{timestamp}.txt'
             with open(charged_file, 'w') as f:
@@ -233,7 +243,6 @@ def export_card_results(user_id, username, results, gate_name):
                     f.write(f"{card}\n")
             files_to_send.append((f'🔥 Charged ({len(charged_cards)})', charged_file))
         
-        # OTP/3DS cards
         if otp_cards and EXPORT_3DS:
             otp_file = f'{export_dir}/otp_3ds_{timestamp}.txt'
             with open(otp_file, 'w') as f:
@@ -244,7 +253,6 @@ def export_card_results(user_id, username, results, gate_name):
                     f.write(f"{card}\n")
             files_to_send.append((f'🔐 OTP/3DS ({len(otp_cards)})', otp_file))
         
-        # Low Funds cards
         if low_funds_cards and EXPORT_LOW_FUNDS:
             low_file = f'{export_dir}/low_funds_{timestamp}.txt'
             with open(low_file, 'w') as f:
@@ -263,6 +271,7 @@ def export_card_results(user_id, username, results, gate_name):
 
 # ==================== CARD CHECKING ====================
 def check_single_card(cc, gate_module, amount, user_id, refund_list):
+    """Check single card - Fixed response handling"""
     for attempt in range(2):
         try:
             time.sleep(random.uniform(0.5, 1.0))
@@ -272,15 +281,27 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
             if USE_PROXY and proxy_manager.has_proxies():
                 proxies = proxy_manager.get_random_proxy()
             
+            # Call gate module's Tele function
             try:
                 result = gate_module.Tele(cc, amount, proxies=proxies)
             except TypeError:
                 result = gate_module.Tele(cc, amount)
+            except Exception as e:
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                raise e
             
+            # Parse gate result - handle different return types
             if isinstance(result, tuple) and len(result) >= 2:
-                response_text = result[0]
+                response_text = str(result[0])
+                gateway_info = str(result[1]) if len(result) > 1 else "Unknown"
+            elif isinstance(result, str):
+                response_text = result
+                gateway_info = "Unknown"
             else:
                 response_text = str(result)
+                gateway_info = "Unknown"
             
             if not response_text or len(response_text.strip()) < 5:
                 if attempt == 0:
@@ -288,23 +309,33 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
                     continue
                 response_text = "No response from gateway"
             
+            # Classify response - use gate module's classifier if available
             if hasattr(gate_module, 'classify_response'):
-                sc, detail = gate_module.classify_response(response_text)
+                try:
+                    sc, detail = gate_module.classify_response(response_text)
+                except Exception as e:
+                    sc, detail = "UNKNOWN", str(response_text)[:50]
+                
+                # Map gate status to standard format
                 status_map = {
                     'HIT': ('HIT', 'CHARGED', '🔥', True),
                     'CCN': ('CCN', 'CCN LIVE', '✅', True),
                     'CVV': ('CVV', 'CVV LIVE', '✅', True),
                     '3DS': ('3DS', 'OTP REQUIRED', '🔐', True),
                     'INSUFFICIENT': ('INSUFFICIENT', 'LOW FUNDS', '💰', True),
+                    'EXPIRED': ('EXPIRED', 'EXPIRED', '📅', False),
                     'DEAD': ('DEAD', 'DECLINED', '❌', False),
                 }
+                
                 if sc in status_map:
                     status_code, status_display, icon, is_live = status_map[sc]
                 else:
+                    # Fallback to utils classifier
                     status_code, status_display, icon, is_live = classify_gate_response(response_text)
             else:
                 status_code, status_display, icon, is_live = classify_gate_response(response_text)
             
+            # Refund for expired/error cards
             if status_code in ["EXPIRED", "ERROR"] and cc in refund_list:
                 try:
                     add_credits(user_id, COST_PER_CHECK, None, f"Refund: {status_code}")
@@ -315,24 +346,37 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
             return {
                 'cc': cc,
                 'card_display': f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}",
-                'status': status_display, 'icon': icon, 'status_code': status_code,
-                'response': response_text[:100], 'bin_info': bin_info, 'is_live': is_live
+                'status': status_display,
+                'icon': icon,
+                'status_code': status_code,
+                'response': response_text[:200],
+                'gateway': gateway_info,
+                'bin_info': bin_info,
+                'is_live': is_live
             }
+            
         except Exception as e:
             if attempt == 0:
                 time.sleep(2)
                 continue
+            
             log_error(f"Check error for {cc[:6]}: {str(e)}")
+            
             parts = cc.split("|")
             if cc in refund_list:
                 try:
                     add_credits(user_id, COST_PER_CHECK, None, "Refund: exception")
                 except:
                     pass
+            
             return {
-                'cc': cc, 'card_display': f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}",
-                'status': 'ERROR', 'icon': '⚠️', 'status_code': 'ERROR',
-                'response': str(e)[:100],
+                'cc': cc,
+                'card_display': f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}",
+                'status': 'ERROR',
+                'icon': '⚠️',
+                'status_code': 'ERROR',
+                'response': f"Error: {str(e)[:150]}",
+                'gateway': 'Unknown',
                 'bin_info': {'scheme': 'UNKNOWN', 'type': 'UNKNOWN', 'level': 'UNKNOWN',
                            'country': 'UNKNOWN', 'emoji': '🏳️', 'bank': 'UNKNOWN'},
                 'is_live': False
@@ -340,9 +384,13 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
     
     parts = cc.split("|")
     return {
-        'cc': cc, 'card_display': f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}",
-        'status': 'UNKNOWN', 'icon': '❓', 'status_code': 'UNKNOWN',
+        'cc': cc,
+        'card_display': f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}",
+        'status': 'UNKNOWN',
+        'icon': '❓',
+        'status_code': 'UNKNOWN',
         'response': 'Check failed after retries',
+        'gateway': 'Unknown',
         'bin_info': {'scheme': 'UNKNOWN', 'type': 'UNKNOWN', 'level': 'UNKNOWN',
                    'country': 'UNKNOWN', 'emoji': '🏳️', 'bank': 'UNKNOWN'},
         'is_live': False
@@ -350,11 +398,13 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
 
 # ==================== MASS CHECK EXECUTION ====================
 def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refund_list, progress_msg_id):
+    """Execute mass check - Fixed stop logic"""
     gate_name = gate_info['name']
     gate_module = gate_modules[gate_info['gate_file']]
     total = len(cards)
     start_time = time.time()
     
+    # Initialize tracking
     if chat_id not in active_mass_checks:
         active_mass_checks[chat_id] = {}
     active_mass_checks[chat_id]['stop'] = False
@@ -363,8 +413,26 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
     results = []
     
     for idx, cc in enumerate(cards):
-        if active_mass_checks.get(chat_id, {}).get('stop', False):
+        # ===== CHECK STOP FLAG =====
+        if chat_id in active_mass_checks and active_mass_checks[chat_id].get('stop', False):
+            print(f"🛑 Stop detected for chat {chat_id} at card {idx+1}/{total}")
+            # Add stopped for remaining cards
+            for remaining in cards[idx:]:
+                parts = remaining.split("|")
+                results.append({
+                    'cc': remaining,
+                    'card_display': f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}",
+                    'status': 'STOPPED',
+                    'icon': '🛑',
+                    'status_code': 'STOPPED',
+                    'response': 'Check stopped by user',
+                    'gateway': gate_name,
+                    'bin_info': {'scheme': 'UNKNOWN', 'type': 'UNKNOWN', 'level': 'UNKNOWN',
+                               'country': 'UNKNOWN', 'emoji': '🏳️', 'bank': 'UNKNOWN'},
+                    'is_live': False
+                })
             break
+        # ===========================
         
         amount = round(random.uniform(gate_info['amount_min'], gate_info['amount_max']), 2)
         result = check_single_card(cc, gate_module, str(amount), user_id, refund_list)
@@ -374,20 +442,27 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
         card_elapsed = time.time() - start_time
         forward_card_result(chat_id, cc, result, gate_name, amount, card_elapsed, username, user_id)
         
-        # Save result to database
-        save_card_result(user_id, cc, gate_name, amount, result['status_code'], result['response'], result['bin_info'])
+        # Save to database
+        try:
+            save_card_result(user_id, cc, gate_name, amount, result['status_code'], result['response'], result['bin_info'])
+        except:
+            pass
         
+        # Update stats
         stats['checked'] += 1
-        if result['status_code'] == 'HIT':
+        sc = result['status_code']
+        if sc == 'HIT':
             stats['charged'] += 1
-        elif result['status_code'] == '3DS':
+        elif sc == '3DS':
             stats['otp'] += 1
-        elif result['status_code'] == 'INSUFFICIENT':
+        elif sc == 'INSUFFICIENT':
             stats['low_funds'] += 1
-        elif result['status_code'] in ['DEAD', 'EXPIRED']:
+        elif sc in ['DEAD', 'EXPIRED']:
             stats['declined'] += 1
-        elif result['status_code'] == 'ERROR':
+        elif sc == 'ERROR':
             stats['network_error'] += 1
+        elif sc in ['CCN', 'CVV']:
+            stats['declined'] += 1
         else:
             stats['declined'] += 1
         
@@ -396,10 +471,16 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
         progress_percent = (idx + 1) / total * 100
         filled = int(progress_percent / 16.67)
         empty = 6 - filled
+        if filled > 6:
+            filled = 6
+        if empty < 0:
+            empty = 0
         bar = "▬" * filled + "▭" * empty
         
         current_card = cc.split('|')
         card_display = f"{current_card[0][:6]}...{current_card[0][-4:]}|{current_card[1]}|{current_card[2]}|{current_card[3]}"
+        
+        response_display = result['response'][:100]
         
         progress_text = f"""<b>📂 FILE CHECK - LIVE</b>
 <b>━━━━━━━━━━━━━━━━━━━━━━</b>
@@ -409,7 +490,7 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
 <b>💳 Card:</b>
 <code>{card_display}</code>
 <b>📊 Status:</b> {result['icon']} <code>{result['status']}</code>
-<b>💬 Response:</b> <i>{result['response'][:50]}</i>
+<b>💬 Response:</b> <i>{response_display}</i>
 
 <b>┏━━━━━━━━━━━━━━━━━━━━┓</b>
 <b>┃ {bar} {progress_percent:.1f}%</b>
@@ -435,16 +516,27 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
         except:
             pass
         
+        # Check stop again after progress update
+        if chat_id in active_mass_checks and active_mass_checks[chat_id].get('stop', False):
+            print(f"🛑 Stop confirmed for chat {chat_id}")
+            break
+        
         time.sleep(random.uniform(0.3, 0.7))
     
-    # Completion
+    # ===== COMPLETION =====
     elapsed = time.time() - start_time
-    active_mass_checks.get(chat_id, {}).pop('stop', None)
+    
+    # Clean up stop flag
+    if chat_id in active_mass_checks:
+        active_mass_checks[chat_id]['stop'] = False
     
     update_user_stats(user_id, {
-        'total_checked': stats['checked'], 'total_charged': stats['charged'],
-        'total_otp': stats['otp'], 'total_lowfunds': stats['low_funds'],
-        'total_declined': stats['declined'], 'total_network_error': stats['network_error']
+        'total_checked': stats['checked'],
+        'total_charged': stats['charged'],
+        'total_otp': stats['otp'],
+        'total_lowfunds': stats['low_funds'],
+        'total_declined': stats['declined'],
+        'total_network_error': stats['network_error']
     })
     
     hit_rate = (stats['charged'] / stats['checked'] * 100) if stats['checked'] > 0 else 0
@@ -492,7 +584,7 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
     except:
         bot.send_message(chat_id, summary_text, reply_markup=markup)
     
-    # Auto export if enabled
+    # Auto export
     if AUTO_EXPORT_RESULTS:
         export_files = export_card_results(user_id, username, results, gate_name)
         for label, filepath in export_files:
@@ -668,11 +760,11 @@ def handle_mass_check_start(message, cards, gate_key, gate_info):
 def stop_command(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
+    
     if chat_id in active_mass_checks:
-        for msg_id, data in active_mass_checks[chat_id].items():
-            if isinstance(data, dict) and data.get('user_id') == user_id:
-                data['stop'] = True
-        bot.reply_to(message, "🛑 <b>Check stopped!</b>")
+        active_mass_checks[chat_id]['stop'] = True
+        print(f"🛑 /stop command received for chat {chat_id}")
+        bot.reply_to(message, "🛑 <b>Stopping check...</b>")
     else:
         bot.reply_to(message, "❌ No active check to stop!")
 
@@ -683,45 +775,34 @@ def balance_command(message):
 
 @bot.message_handler(commands=["transfer"])
 def transfer_command(message):
-    """Transfer credits to another user"""
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
-    
     parts = message.text.split()
     
     if len(parts) < 3:
         bot.reply_to(message, f"""<b>💸 Credit Transfer</b>
 <b>━━━━━━━━━━━━━━━━━━</b>
 <b>📌 Usage:</b> /transfer @username amount
-
-<b>Examples:</b>
-<code>/transfer @friend 100</code>
-<code>/transfer 123456789 50</code>
-
-<b>💰 Your Balance:</b> <code>{get_user_credits(user_id)}</code> credits
-<b>📌 Min Transfer:</b> <code>{MIN_TRANSFER}</code> credits""")
+<b>📌 Min Transfer:</b> <code>{MIN_TRANSFER}</code> credits
+<b>💰 Your Balance:</b> <code>{get_user_credits(user_id)}</code> credits""")
         return
     
-    # Parse receiver and amount
     receiver_input = parts[1].replace('@', '')
-    
     try:
         amount = int(parts[2])
-    except ValueError:
-        bot.reply_to(message, "❌ Invalid amount! Must be a number.")
+    except:
+        bot.reply_to(message, "❌ Invalid amount!")
         return
     
     if amount < MIN_TRANSFER:
-        bot.reply_to(message, f"❌ Minimum transfer amount is {MIN_TRANSFER} credits!")
+        bot.reply_to(message, f"❌ Minimum transfer is {MIN_TRANSFER} credits!")
         return
     
-    # Check sender balance
     sender_credits = get_user_credits(user_id)
     if sender_credits < amount:
         bot.reply_to(message, f"❌ Insufficient credits! You have {sender_credits} credits.")
         return
     
-    # Find receiver
     receiver = None
     if receiver_input.isdigit():
         receiver_id = int(receiver_input)
@@ -730,16 +811,14 @@ def transfer_command(message):
     else:
         receiver = get_user_by_username(receiver_input)
         if not receiver:
-            bot.reply_to(message, f"❌ User @{receiver_input} not found! They need to start the bot first.")
+            bot.reply_to(message, f"❌ User @{receiver_input} not found!")
             return
     
     receiver_id = receiver['user_id']
-    
     if receiver_id == user_id:
-        bot.reply_to(message, "❌ You cannot transfer credits to yourself!")
+        bot.reply_to(message, "❌ Cannot transfer to yourself!")
         return
     
-    # Confirm transfer
     receiver_username = receiver['username'] or f"User{receiver_id}"
     
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -753,9 +832,7 @@ def transfer_command(message):
 <b>👤 From:</b> @{username}
 <b>👤 To:</b> @{receiver_username}
 <b>💰 Amount:</b> <code>{amount}</code> credits
-<b>💎 Your Balance After:</b> <code>{sender_credits - amount}</code> credits
-
-<b>Confirm transfer?</b>"""
+<b>💎 Balance After:</b> <code>{sender_credits - amount}</code> credits"""
     
     bot.reply_to(message, confirm_text, reply_markup=markup)
 
@@ -829,23 +906,15 @@ def proxy_command(message):
     text = f"""<b>🌐 Proxy Management</b>
 <b>━━━━━━━━━━━━━━━━━━</b>
 <b>📊 Status:</b> {status}
-<b>📦 Total Proxies:</b> <code>{proxy_count}</code>
-
-<b>📌 Commands:</b>
-<b>/addproxy</b> ip:port - Add single proxy
-<b>/removeproxy</b> ip:port - Remove proxy
-<b>/proxylist</b> - View all proxies
-<b>/checkproxy</b> - Check all proxies
-<b>/clearproxy</b> - Clear all proxies
-<b>/toggleproxy</b> - Enable/Disable proxy"""
+<b>📦 Total Proxies:</b> <code>{proxy_count}</code>"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("📋 View Proxies", callback_data="proxy_list"),
-        types.InlineKeyboardButton("🔍 Check All", callback_data="proxy_check_all")
+        types.InlineKeyboardButton("📋 View", callback_data="proxy_list"),
+        types.InlineKeyboardButton("🔍 Check", callback_data="proxy_check_all")
     )
     markup.add(
-        types.InlineKeyboardButton("🗑 Clear All", callback_data="proxy_clear"),
-        types.InlineKeyboardButton("🔄 Toggle ON/OFF", callback_data="proxy_toggle")
+        types.InlineKeyboardButton("🗑 Clear", callback_data="proxy_clear"),
+        types.InlineKeyboardButton("🔄 Toggle", callback_data="proxy_toggle")
     )
     markup.add(types.InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu"))
     bot.reply_to(message, text, reply_markup=markup)
@@ -857,13 +926,9 @@ def add_proxy_command(message):
         return
     parts = message.text.split()
     if len(parts) < 2:
-        bot.reply_to(message, "<b>📌 Usage:</b> /addproxy ip:port or /addproxy ip:port:user:pass")
+        bot.reply_to(message, "<b>📌 Usage:</b> /addproxy ip:port")
         return
-    proxy_string = parts[1]
-    if ':' not in proxy_string:
-        bot.reply_to(message, "❌ Invalid format!")
-        return
-    success, msg = proxy_manager.add_proxy(proxy_string)
+    success, msg = proxy_manager.add_proxy(parts[1])
     bot.reply_to(message, msg)
 
 @bot.message_handler(commands=["removeproxy"])
@@ -885,7 +950,7 @@ def proxy_list_command(message):
         return
     proxies = proxy_manager.get_all_proxies()
     if not proxies:
-        bot.reply_to(message, "📭 No proxies added yet!")
+        bot.reply_to(message, "📭 No proxies added!")
         return
     text = f"<b>📋 Proxy List</b> ({len(proxies)} total)\n<b>━━━━━━━━━━━━━━━━━━</b>\n"
     for i, proxy in enumerate(proxies[:50], 1):
@@ -931,7 +996,7 @@ def run_proxy_check(chat_id, message_id, user_id):
             status_icon = "✅" if is_working else "❌"
             progress_text = f"""<b>🔍 Proxy Checker - Running</b>
 <b>━━━━━━━━━━━━━━━━━━</b>
-<b>📦 Total Proxies:</b> <code>{total_count}</code>
+<b>📦 Total:</b> <code>{total_count}</code>
 <b>┏━━━━━━━━━━━━━━━━━━━━┓</b>
 <b>┃ {bar} {progress_percent:.1f}%</b>
 <b>┗━━━━━━━━━━━━━━━━━━━━┛</b>
@@ -973,10 +1038,10 @@ def clear_proxy_command(message):
         return
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("✅ Yes, Clear All", callback_data="proxy_clear_confirm"),
+        types.InlineKeyboardButton("✅ Yes", callback_data="proxy_clear_confirm"),
         types.InlineKeyboardButton("❌ Cancel", callback_data="proxy_cancel")
     )
-    bot.reply_to(message, "⚠️ <b>Are you sure you want to clear ALL proxies?</b>", reply_markup=markup)
+    bot.reply_to(message, "⚠️ <b>Clear ALL proxies?</b>", reply_markup=markup)
 
 @bot.message_handler(commands=["toggleproxy"])
 def toggle_proxy_command(message):
@@ -1007,13 +1072,13 @@ def handle_callbacks(call):
         success, msg = transfer_credits(user_id, receiver_id, amount)
         if success:
             bot.answer_callback_query(call.id, "✅ Transfer successful!")
-            bot.edit_message_text(f"<b>✅ Transfer Successful!</b>\n<b>━━━━━━━━━━━━━━━━━━</b>\n<b>💰 Amount:</b> <code>{amount}</code> credits\n<b>👤 To:</b> <code>{receiver_id}</code>", chat_id, message_id)
+            bot.edit_message_text(f"<b>✅ Transfer Successful!</b>\n<b>💰 Amount:</b> <code>{amount}</code> credits\n<b>👤 To:</b> <code>{receiver_id}</code>", chat_id, message_id)
         else:
             bot.answer_callback_query(call.id, f"❌ {msg}")
             bot.edit_message_text(f"<b>❌ Transfer Failed!</b>\n{msg}", chat_id, message_id)
     
     elif call.data == "transfer_cancel":
-        bot.answer_callback_query(call.id, "❌ Transfer cancelled")
+        bot.answer_callback_query(call.id, "❌ Cancelled")
         bot.edit_message_text("❌ <b>Transfer cancelled!</b>", chat_id, message_id)
     
     elif call.data.startswith("start_check_"):
@@ -1042,20 +1107,26 @@ def handle_callbacks(call):
     
     elif call.data == "cancel_check":
         active_mass_checks.get(chat_id, {}).pop(str(message_id), None)
-        bot.answer_callback_query(call.id, "❌ Check cancelled")
+        bot.answer_callback_query(call.id, "❌ Cancelled")
         bot.edit_message_text("❌ <b>Check cancelled!</b>", chat_id, message_id)
     
     elif call.data == "stop_check":
+        # Set stop flag
         if chat_id in active_mass_checks:
-            for key, data in active_mass_checks[chat_id].items():
-                if isinstance(data, dict):
-                    data['stop'] = True
+            active_mass_checks[chat_id]['stop'] = True
+            print(f"🛑 Stop button pressed for chat {chat_id}")
+        else:
+            active_mass_checks[chat_id] = {'stop': True}
+        
         bot.answer_callback_query(call.id, "🛑 Stopping check...")
+        try:
+            bot.edit_message_text("🛑 <b>Stopping... Please wait...</b>", chat_id, message_id)
+        except:
+            pass
     
     elif call.data.startswith("export_results_"):
-        gate_key = call.data.replace("export_results_", "")
-        bot.answer_callback_query(call.id, "📤 Export started, check your files!")
-        bot.send_message(chat_id, "📤 <b>Export files are being sent to you...</b>")
+        bot.answer_callback_query(call.id, "📤 Export started!")
+        bot.send_message(chat_id, "📤 <b>Export files are being sent...</b>")
     
     elif call.data == "main_menu":
         credits = get_user_credits(user_id)
@@ -1065,7 +1136,6 @@ def handle_callbacks(call):
 <b>🆔 ID:</b> <code>{user_id}</code>
 <b>💎 Plan:</b> Free
 <b>💰 Credits:</b> <code>{credits}</code>
-
 <b>📊 System Status:</b>
 <b>⚡ Operational:</b> ✅
 <b>🌐 Gateways:</b> 6/6 Online"""
@@ -1085,9 +1155,9 @@ def handle_callbacks(call):
         bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
     
     elif call.data == "start_checking":
-        text = f"""<b>🚀 Start Mass Checking</b>
+        text = """<b>🚀 Start Mass Checking</b>
 <b>━━━━━━━━━━━━━━━━━━</b>
-<b>💡 Send cards directly or select a gate first:</b>"""
+<b>💡 Send cards directly or select a gate:</b>"""
         markup = types.InlineKeyboardMarkup(row_width=3)
         markup.add(
             types.InlineKeyboardButton("v1", callback_data="gate_v1"),
@@ -1113,7 +1183,7 @@ def handle_callbacks(call):
 <b>🔥 Charged:</b> <code>{stats['total_charged']}</code>
 <b>🔐 OTP/Action:</b> <code>{stats['total_otp']}</code>
 <b>💰 Low Funds:</b> <code>{stats['total_lowfunds']}</code>
-<b>❌ Declined/CCN:</b> <code>{stats['total_declined']}</code>
+<b>❌ Declined:</b> <code>{stats['total_declined']}</code>
 <b>⚠️ Network Err:</b> <code>{stats['total_network_error']}</code>
 <b>━━━━━━━━━━━━━━━━━━</b>
 <b>🎯 Hit Rate:</b> <code>{hit_rate:.1f}%</code>"""
@@ -1122,7 +1192,7 @@ def handle_callbacks(call):
         bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
     
     elif call.data == "tools":
-        text = f"""<b>🔧 Gateway Selection</b>
+        text = """<b>🔧 Gateway Selection</b>
 <b>━━━━━━━━━━━━━━━━━━</b>
 <b>Status:</b> All Free
 <b>Page:</b> [1/1]"""
@@ -1162,11 +1232,8 @@ def handle_callbacks(call):
         text = f"""<b>👥 Referral Program</b>
 <b>━━━━━━━━━━━━━━━━━━</b>
 <b>🎁 Invite friends and earn rewards!</b>
-
-<b>Per invited user:</b>
 <b>⏰ +3 Days Premium</b>
 <b>💰 +100 Credits</b>
-
 <b>🔗 Your invite link:</b>
 <code>{invite_link}</code>"""
         markup = types.InlineKeyboardMarkup()
@@ -1191,17 +1258,13 @@ def handle_callbacks(call):
     
     elif call.data == "recheck":
         bot.answer_callback_query(call.id, "🔄 Send cards again or use /v1 to /v6")
-    
     elif call.data == "copy_code":
         bot.answer_callback_query(call.id, "📋 Results displayed below")
-    
     elif call.data == "export":
         bot.answer_callback_query(call.id, "📤 Export feature coming soon")
-    
     elif call.data == "contact_admin":
         bot.answer_callback_query(call.id)
         bot.send_message(chat_id, f"📞 Contact admin: {ADMIN_USERNAME}")
-    
     elif call.data == "back_to_menu":
         credits = get_user_credits(user_id)
         text = f"""<b>🔥 {BOT_NAME}</b>
@@ -1227,7 +1290,7 @@ def handle_callbacks(call):
     elif call.data == "proxy_list":
         proxies = proxy_manager.get_all_proxies()
         if not proxies:
-            bot.answer_callback_query(call.id, "📭 No proxies added!")
+            bot.answer_callback_query(call.id, "📭 No proxies!")
             return
         text = f"<b>📋 Proxy List</b> ({len(proxies)} total)\n<b>━━━━━━━━━━━━━━━━━━</b>\n"
         for i, proxy in enumerate(proxies[:30], 1):
@@ -1242,10 +1305,10 @@ def handle_callbacks(call):
     elif call.data == "proxy_clear":
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("✅ Yes, Clear All", callback_data="proxy_clear_confirm"),
+            types.InlineKeyboardButton("✅ Yes", callback_data="proxy_clear_confirm"),
             types.InlineKeyboardButton("❌ Cancel", callback_data="proxy_cancel")
         )
-        bot.edit_message_text("⚠️ <b>Are you sure?</b>", chat_id, message_id, reply_markup=markup)
+        bot.edit_message_text("⚠️ <b>Clear ALL proxies?</b>", chat_id, message_id, reply_markup=markup)
         bot.answer_callback_query(call.id)
     
     elif call.data == "proxy_clear_confirm":
@@ -1264,22 +1327,6 @@ def handle_callbacks(call):
         USE_PROXY = not USE_PROXY
         status = "🟢 ENABLED" if USE_PROXY else "🔴 DISABLED"
         bot.answer_callback_query(call.id, f"Proxy {status}")
-        proxy_count = proxy_manager.count_proxies()
-        text = f"""<b>🌐 Proxy Management</b>
-<b>━━━━━━━━━━━━━━━━━━</b>
-<b>📊 Status:</b> {status}
-<b>📦 Total Proxies:</b> <code>{proxy_count}</code>"""
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("📋 View", callback_data="proxy_list"),
-            types.InlineKeyboardButton("🔍 Check", callback_data="proxy_check_all")
-        )
-        markup.add(
-            types.InlineKeyboardButton("🗑 Clear", callback_data="proxy_clear"),
-            types.InlineKeyboardButton("🔄 Toggle", callback_data="proxy_toggle")
-        )
-        markup.add(types.InlineKeyboardButton("⬅️ Menu", callback_data="main_menu"))
-        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
     
     elif call.data == "proxy_check_all":
         total = proxy_manager.count_proxies()
@@ -1372,7 +1419,6 @@ def handle_document(message):
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         text = downloaded_file.decode('utf-8')
-        
         caption = (message.caption or '').lower()
         
         if 'proxy' in caption:
