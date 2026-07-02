@@ -158,7 +158,7 @@ def Tele(ccx: str, amount: str = "0.50"):
     try:
         response = session.post(url_stripe, headers=headers_stripe, data=stripe_data, timeout=30)
     except requests.exceptions.RequestException as e:
-        return f"NETWORK_ERROR: {str(e)[:80]}", gateway_name
+        return f"ERROR - Network: {str(e)[:80]}", gateway_name
     
     if response.status_code != 200:
         try:
@@ -173,22 +173,22 @@ def Tele(ccx: str, amount: str = "0.50"):
             return f"CCN - Wrong card number", gateway_name
         if any(k in error_lower for k in ['cvc', 'cvv']):
             return f"CVV - Wrong CVV", gateway_name
-        if 'expired' in error_lower:
+        if 'card has expired' in error_lower or 'expired' in error_lower:
             return f"EXPIRED - Card expired", gateway_name
         if 'insufficient' in error_lower:
             return f"INSUFFICIENT - Low balance", gateway_name
         if 'declined' in error_lower:
             return f"DECLINED - Card declined", gateway_name
         
-        return f"STRIPE_ERROR: {error_msg[:80]}", gateway_name
+        return f"DECLINED - {error_msg[:80]}", gateway_name
     
     try:
         response_json = response.json()
         if 'id' not in response_json:
-            return f"STRIPE_ERROR: No ID", gateway_name
+            return f"ERROR - No payment ID", gateway_name
         payment_method_id = response_json['id']
     except Exception as e:
-        return f"JSON_PARSE_ERROR: {str(e)[:80]}", gateway_name
+        return f"ERROR - {str(e)[:80]}", gateway_name
     
     # ========== STEP 2: Charge via WordPress Admin AJAX ==========
     url_wp = "https://torr.ie/wp-admin/admin-ajax.php"
@@ -217,38 +217,50 @@ def Tele(ccx: str, amount: str = "0.50"):
     try:
         r2 = session.post(url_wp, data=wp_data, headers=headers_wp, timeout=30)
     except requests.exceptions.RequestException as e:
-        return f"NETWORK_ERROR: {str(e)[:80]}", gateway_name
+        return f"ERROR - Network: {str(e)[:80]}", gateway_name
     
     try:
         response_json = r2.json()
         message = str(response_json.get('message', r2.text))
         
-        # ===== FIX: Properly classify and return =====
-        status, detail = classify_response(message)
+        # ===== FIX: Direct response checking without classify_response =====
+        message_lower = message.lower()
         
-        # ===== Return in format that bot.py expects =====
-        # bot.py expects: (response_text, gateway_name)
-        # response_text should contain the status for bot.py to classify
-        
-        if status == "HIT":
+        # Check for success
+        if any(k in message_lower for k in ['appreciate', 'appreciated', 'thank', 'thanks', 'success', 'approved', 'payment success']):
             return f"HIT - Payment successful ✅", gateway_name
-        elif status == "CCN":
-            return f"CCN - CCN Match ✅", gateway_name
-        elif status == "CVV":
-            return f"CVV - CVV Match ✅", gateway_name
-        elif status == "3DS":
-            return f"3DS - 3D Secure required 🔐", gateway_name
-        elif status == "INSUFFICIENT":
+        
+        # Check for insufficient funds
+        if any(k in message_lower for k in ['insufficient', 'low balance', 'insufficient_funds']):
             return f"INSUFFICIENT - Low balance 💰", gateway_name
-        elif status == "EXPIRED":
-            return f"EXPIRED - Card expired 📅", gateway_name
-        elif status == "DEAD":
-            # Make sure DEAD is returned as DECLINED for bot.py
-            return f"DECLINED - {message[:60]}", gateway_name
-        else:
-            # Default to DEAD/DECLINED
-            return f"DECLINED - {message[:60]}", gateway_name
-            
+        
+        # Check for 3DS/OTP
+        if any(k in message_lower for k in ['action_required', 'verify', 'verifying', '3ds', 'otp', 'requires_action']):
+            return f"3DS - 3D Secure required 🔐", gateway_name
+        
+        # Check for CCN (wrong card number)
+        if 'incorrect' in message_lower and 'number' in message_lower:
+            return f"CCN - Wrong card number", gateway_name
+        
+        # Check for CVV (wrong CVV)
+        if any(k in message_lower for k in ['cvc', 'cvv']) and ('incorrect' in message_lower or 'wrong' in message_lower):
+            return f"CVV - Wrong CVV", gateway_name
+        
+        # Check for expired - ONLY if it clearly says expired
+        if 'card has expired' in message_lower or 'expired card' in message_lower:
+            return f"EXPIRED - Card has expired 📅", gateway_name
+        
+        # Check for declined
+        if any(k in message_lower for k in ['declined', 'generic_decline', 'do_not_honor', 'cannot be processed']):
+            return f"DECLINED - {message[:50]}", gateway_name
+        
+        # Check for network/proxy errors
+        if any(k in message_lower for k in ['failed', 'error', 'timeout', 'network']):
+            return f"ERROR - {message[:50]}", gateway_name
+        
+        # Default - treat as declined
+        return f"DECLINED - {message[:60]}", gateway_name
+        
     except Exception as e:
         return f"ERROR - {str(e)[:60]}", gateway_name
 
