@@ -210,7 +210,6 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
                 raise e
             
             # ===== PARSE GATE RESULT =====
-            # Gate returns: (response_text, gateway_name)
             if isinstance(gate_result, tuple) and len(gate_result) >= 1:
                 raw_response = str(gate_result[0])
                 gateway_name = str(gate_result[1]) if len(gate_result) > 1 else "Gate"
@@ -221,7 +220,6 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
                 raw_response = str(gate_result)
                 gateway_name = "Gate"
             
-            # Clean response
             raw_response = raw_response.strip()
             if not raw_response or len(raw_response) < 3:
                 if attempt == 0:
@@ -236,7 +234,6 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
                 except:
                     status_code, detail = "UNKNOWN", raw_response[:50]
                 
-                # Map gate status codes to display
                 gate_status_map = {
                     'HIT': ('HIT', 'CHARGED', '🔥'),
                     'CCN': ('CCN', 'CCN LIVE', '✅'),
@@ -250,7 +247,7 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
                 if status_code in gate_status_map:
                     sc, sd, icon = gate_status_map[status_code]
                 else:
-                    sc, sd, icon = classify_gate_response(raw_response)
+                    sc, sd, icon, _ = classify_gate_response(raw_response)
             else:
                 sc, sd, icon, _ = classify_gate_response(raw_response)
             
@@ -268,7 +265,7 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
                 'status': sd,
                 'icon': icon,
                 'status_code': sc,
-                'response': raw_response[:200],  # Actual gate response
+                'response': raw_response[:200],
                 'gateway': gateway_name,
                 'bin_info': bin_info,
             }
@@ -366,11 +363,9 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
         empty = max(6 - filled, 0)
         bar = "▬" * filled + "▭" * empty
         
-        # Card display
         current_card = cc.split('|')
         card_display = f"{current_card[0][:6]}...{current_card[0][-4:]}|{current_card[1]}|{current_card[2]}|{current_card[3]}"
         
-        # Show actual gate response
         response_show = result['response'][:80]
         
         progress_text = f"""<b>📂 FILE CHECK - LIVE</b>
@@ -491,11 +486,9 @@ def export_card_results(user_id, username, results, gate_name):
         charged_cards = []
         otp_cards = []
         low_funds_cards = []
-        all_cards = []
         
         for r in results:
             card_info = f"{r['cc']} | {r['status']} | {r['response'][:50]}"
-            all_cards.append(card_info)
             if r['status_code'] in ['HIT', 'CHARGED']:
                 charged_cards.append(card_info)
             elif r['status_code'] in ['3DS', 'OTP REQUIRED']:
@@ -591,7 +584,6 @@ def mass_check_command(message):
         bot.reply_to(message, f"❌ Gate module not found!")
         return
     
-    # Only accept TXT file - prompt user
     text = f"""<b>📥 Send .txt file for {gate_info['name']}</b>
 <b>━━━━━━━━━━━━━━━━━━</b>
 <b>💵 Amount:</b> ${gate_info['amount_min']} - ${gate_info['amount_max']}
@@ -746,6 +738,7 @@ def add_credits_command(message):
 # ==================== CALLBACKS ====================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
+    global USE_PROXY
     user_id = call.from_user.id
     username = call.from_user.username or call.from_user.first_name
     chat_id = call.message.chat.id
@@ -917,7 +910,7 @@ def handle_callbacks(call):
     elif call.data == "recheck":
         bot.answer_callback_query(call.id, "🔄 Send file again with /v1 to /v6")
     
-    # Proxy callbacks
+    # ===== PROXY CALLBACKS =====
     elif call.data == "proxy_menu":
         count = proxy_manager.count_proxies()
         status = "🟢 ON" if USE_PROXY else "🔴 OFF"
@@ -977,9 +970,28 @@ def handle_callbacks(call):
         bot.answer_callback_query(call.id)
     
     elif call.data == "proxy_toggle":
-        global USE_PROXY
         USE_PROXY = not USE_PROXY
         bot.answer_callback_query(call.id, f"{'🟢 ON' if USE_PROXY else '🔴 OFF'}")
+        # Update proxy menu
+        count = proxy_manager.count_proxies()
+        status = "🟢 ON" if USE_PROXY else "🔴 OFF"
+        text = f"""<b>🌐 Proxy</b>
+<b>Status:</b> {status}
+<b>Total:</b> <code>{count}</code>"""
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📋 List", callback_data="proxy_list"),
+            types.InlineKeyboardButton("🔍 Check", callback_data="proxy_check_all")
+        )
+        markup.add(
+            types.InlineKeyboardButton("🗑 Clear", callback_data="proxy_clear"),
+            types.InlineKeyboardButton("🔄 Toggle", callback_data="proxy_toggle")
+        )
+        markup.add(types.InlineKeyboardButton("⬅️ Menu", callback_data="main_menu"))
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
+        except:
+            pass
 
 def run_proxy_check(chat_id, message_id, user_id):
     total = proxy_manager.count_proxies()
