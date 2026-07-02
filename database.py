@@ -51,6 +51,30 @@ def init_database():
         )
     ''')
     
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transfers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER,
+            receiver_id INTEGER,
+            amount INTEGER,
+            timestamp TEXT
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS card_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            card TEXT,
+            gate TEXT,
+            amount REAL,
+            status TEXT,
+            response TEXT,
+            bin_info TEXT,
+            timestamp TEXT
+        )
+    ''')
+    
     conn.commit()
 
 def create_user(user_id, username, first_name, referred_by=None):
@@ -102,6 +126,68 @@ def deduct_credit(user_id, amount):
         conn.commit()
         return True
     return False
+
+def transfer_credits(sender_id, receiver_id, amount):
+    """Transfer credits between users"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Check sender balance
+    cursor.execute('SELECT credits FROM users WHERE user_id = ?', (sender_id,))
+    sender = cursor.fetchone()
+    if not sender or sender['credits'] < amount:
+        return False, "Insufficient credits"
+    
+    # Deduct from sender
+    cursor.execute('UPDATE users SET credits = credits - ? WHERE user_id = ?', (amount, sender_id))
+    add_transaction(sender_id, -amount, 'transfer_out', f'Transfer to {receiver_id}')
+    
+    # Add to receiver
+    create_user(receiver_id, None, None)
+    cursor.execute('UPDATE users SET credits = credits + ? WHERE user_id = ?', (amount, receiver_id))
+    add_transaction(receiver_id, amount, 'transfer_in', f'Transfer from {sender_id}')
+    
+    # Record transfer
+    cursor.execute('''
+        INSERT INTO transfers (sender_id, receiver_id, amount, timestamp)
+        VALUES (?, ?, ?, ?)
+    ''', (sender_id, receiver_id, amount, datetime.now().isoformat()))
+    
+    conn.commit()
+    return True, "Transfer successful"
+
+def save_card_result(user_id, card, gate, amount, status, response, bin_info):
+    """Save card check result"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO card_results (user_id, card, gate, amount, status, response, bin_info, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, card, gate, amount, status, response[:200], str(bin_info), datetime.now().isoformat()))
+    conn.commit()
+
+def get_user_card_results(user_id, status_filter=None, limit=500):
+    """Get user card results with optional filter"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    if status_filter:
+        cursor.execute('''
+            SELECT * FROM card_results 
+            WHERE user_id = ? AND status = ?
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        ''', (user_id, status_filter, limit))
+    else:
+        cursor.execute('''
+            SELECT * FROM card_results 
+            WHERE user_id = ?
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        ''', (user_id, limit))
+    
+    return cursor.fetchall()
 
 def update_user_stats(user_id, stats_dict):
     """Update user statistics"""
@@ -181,6 +267,18 @@ def get_user_transactions(user_id, limit=50):
     ''', (user_id, limit))
     return cursor.fetchall()
 
+def get_transfer_history(user_id, limit=50):
+    """Get transfer history for user"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM transfers 
+        WHERE sender_id = ? OR receiver_id = ?
+        ORDER BY timestamp DESC 
+        LIMIT ?
+    ''', (user_id, user_id, limit))
+    return cursor.fetchall()
+
 def get_total_stats():
     """Get total bot statistics"""
     conn = get_connection()
@@ -200,3 +298,12 @@ def get_total_stats():
         'total_credits': total_credits,
         'total_checks': total_checks
     }
+
+def get_user_by_username(username):
+    """Find user by username"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    clean_username = username.replace('@', '')
+    cursor.execute('SELECT * FROM users WHERE username = ?', (clean_username,))
+    return cursor.fetchone()
