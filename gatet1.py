@@ -27,6 +27,7 @@ exceed_keys = ["exceeding its amount limit"]
 proxyfailed_keys = ["Failed to perform"]
 
 def classify_response(last):
+    """Classify response from gateway"""
     last_lower = last.lower()
     if any(key.lower() in last_lower for key in success_keys): 
         return "HIT", "HIT"
@@ -39,7 +40,7 @@ def classify_response(last):
     if any(key.lower() in last_lower for key in insufficient_keys): 
         return "INSUFFICIENT", "LOW_FUND"
     if any(key.lower() in last_lower for key in expired_keys): 
-        return "DEAD", "EXPIRED"
+        return "EXPIRED", "EXPIRED"
     if any(key.lower() in last_lower for key in declined_keys): 
         return "DEAD", "DECLINED"
     return "DEAD", last
@@ -220,24 +221,36 @@ def Tele(ccx: str, amount: str = "0.50"):
     
     try:
         response_json = r2.json()
-        message = response_json.get('message', r2.text)
+        message = str(response_json.get('message', r2.text))
+        
+        # ===== FIX: Properly classify and return =====
         status, detail = classify_response(message)
         
+        # ===== Return in format that bot.py expects =====
+        # bot.py expects: (response_text, gateway_name)
+        # response_text should contain the status for bot.py to classify
+        
         if status == "HIT":
-            return f"APPROVED - Payment successful ✅", gateway_name
+            return f"HIT - Payment successful ✅", gateway_name
         elif status == "CCN":
-            return f"CCN LIVE - CCN Match ✅", gateway_name
+            return f"CCN - CCN Match ✅", gateway_name
         elif status == "CVV":
-            return f"CVV LIVE - CVV Match ✅", gateway_name
+            return f"CVV - CVV Match ✅", gateway_name
         elif status == "3DS":
-            return f"3DS REQUIRED - 3D Secure 🔐", gateway_name
+            return f"3DS - 3D Secure required 🔐", gateway_name
         elif status == "INSUFFICIENT":
-            return f"INSUFFICIENT FUNDS - Low balance 💰", gateway_name
+            return f"INSUFFICIENT - Low balance 💰", gateway_name
+        elif status == "EXPIRED":
+            return f"EXPIRED - Card expired 📅", gateway_name
+        elif status == "DEAD":
+            # Make sure DEAD is returned as DECLINED for bot.py
+            return f"DECLINED - {message[:60]}", gateway_name
         else:
-            return f"DEAD - {message[:60]}", gateway_name
+            # Default to DEAD/DECLINED
+            return f"DECLINED - {message[:60]}", gateway_name
             
-    except:
-        return f"DEAD - {r2.text[:60]}", gateway_name
+    except Exception as e:
+        return f"ERROR - {str(e)[:60]}", gateway_name
 
 
 # ========== TEST ==========
