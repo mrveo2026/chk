@@ -151,14 +151,6 @@ def forward_card_result(chat_id, card, result, gate_name, amount, elapsed, usern
         masked_cc = f"{bin_num}...{last_four}|{parts[1]}|{parts[2]}|{parts[3]}"
         bin_info = get_bin_info(bin_num)
         
-        status_icons = {
-            'HIT': '🔥', 'CHARGED': '🔥', 'CCN': '✅', 'CCN LIVE': '✅',
-            'CVV': '✅', 'CVV LIVE': '✅', '3DS': '🔐', 'OTP REQUIRED': '🔐',
-            'INSUFFICIENT': '💰', 'LOW FUNDS': '💰', 'EXPIRED': '📅',
-            'DEAD': '❌', 'DECLINED': '❌', 'ERROR': '⚠️', 'NETWORK ERROR': '⚠️'
-        }
-        icon = status_icons.get(result['status_code'], '❓')
-        
         ip_section = ""
         if FORWARD_SHOW_IP:
             ip_info = get_ip_info()
@@ -167,7 +159,7 @@ def forward_card_result(chat_id, card, result, gate_name, amount, elapsed, usern
 <b>📡 ISP:</b> {ip_info['isp']}
 """
         
-        forward_text = f"""<b>{icon} {result['status']}</b>
+        forward_text = f"""<b>{result['icon']} {result['status']}</b>
 <b>━━━━━━━━━━━━━━━━━━</b>
 <b>💳 Card:</b> <code>{masked_cc}</code>
 <b>🚪 Gate:</b> {gate_name} ${amount}
@@ -188,7 +180,7 @@ def forward_card_result(chat_id, card, result, gate_name, amount, elapsed, usern
 
 # ==================== CARD CHECKING ====================
 def check_single_card(cc, gate_module, amount, user_id, refund_list):
-    """Check single card - shows actual gate response"""
+    """Check single card - shows RAW gate response"""
     for attempt in range(2):
         try:
             time.sleep(random.uniform(0.5, 1.0))
@@ -227,45 +219,53 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
                     continue
                 raw_response = "No response from gateway"
             
-            # ===== CLASSIFY USING GATE MODULE FIRST =====
+            # ===== CLASSIFY USING GATE MODULE =====
+            status_code = "UNKNOWN"
+            detail = raw_response[:80]
+            icon = "📝"
+            
             if hasattr(gate_module, 'classify_response'):
                 try:
-                    status_code, detail = gate_module.classify_response(raw_response)
+                    sc, dt = gate_module.classify_response(raw_response)
+                    status_code = sc
+                    detail = dt if dt else raw_response[:80]
+                    
+                    # Icon map based on gate classification
+                    icon_map = {
+                        'HIT': '🔥',
+                        'CCN': '✅',
+                        'CVV': '✅',
+                        '3DS': '🔐',
+                        'INSUFFICIENT': '💰',
+                        'EXPIRED': '📅',
+                        'DEAD': '❌',
+                    }
+                    icon = icon_map.get(sc, '📝')
                 except:
-                    status_code, detail = "UNKNOWN", raw_response[:50]
-                
-                gate_status_map = {
-                    'HIT': ('HIT', 'CHARGED', '🔥'),
-                    'CCN': ('CCN', 'CCN LIVE', '✅'),
-                    'CVV': ('CVV', 'CVV LIVE', '✅'),
-                    '3DS': ('3DS', 'OTP REQUIRED', '🔐'),
-                    'INSUFFICIENT': ('INSUFFICIENT', 'LOW FUNDS', '💰'),
-                    'EXPIRED': ('EXPIRED', 'EXPIRED', '📅'),
-                    'DEAD': ('DEAD', 'DECLINED', '❌'),
-                }
-                
-                if status_code in gate_status_map:
-                    sc, sd, icon = gate_status_map[status_code]
-                else:
-                    sc, sd, icon, _ = classify_gate_response(raw_response)
+                    pass
             else:
-                sc, sd, icon, _ = classify_gate_response(raw_response)
+                # Fallback classification
+                sc, sd, ic, _ = classify_gate_response(raw_response)
+                status_code = sc
+                detail = sd
+                icon = ic
             
-            # Refund for expired/error
-            if sc in ["EXPIRED", "ERROR"] and cc in refund_list:
+            # ===== REFUND FOR EXPIRED/ERROR =====
+            if status_code in ["EXPIRED", "ERROR"] and cc in refund_list:
                 try:
-                    add_credits(user_id, COST_PER_CHECK, None, f"Refund: {sc}")
+                    add_credits(user_id, COST_PER_CHECK, None, f"Refund: {status_code}")
                 except:
                     pass
             
+            # ===== RETURN RESULT =====
             parts = cc.split("|")
             return {
                 'cc': cc,
                 'card_display': f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}",
-                'status': sd,
-                'icon': icon,
-                'status_code': sc,
-                'response': raw_response[:200],
+                'status': detail,           # Gate ရဲ့ detail အတိုင်းပြမယ်
+                'icon': icon,               # Classify လုပ်ထားတဲ့ icon
+                'status_code': status_code, # Stats အတွက်
+                'response': raw_response[:200],  # RAW response
                 'gateway': gateway_name,
                 'bin_info': bin_info,
             }
@@ -284,7 +284,7 @@ def check_single_card(cc, gate_module, amount, user_id, refund_list):
             return {
                 'cc': cc,
                 'card_display': f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}",
-                'status': 'ERROR',
+                'status': f'ERROR: {str(e)[:50]}',
                 'icon': '⚠️',
                 'status_code': 'ERROR',
                 'response': f"Error: {str(e)[:150]}",
@@ -330,17 +330,17 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
         result = check_single_card(cc, gate_module, str(amount), user_id, refund_list)
         results.append(result)
         
-        # Forward
+        # Forward result
         card_elapsed = time.time() - start_time
         forward_card_result(chat_id, cc, result, gate_name, amount, card_elapsed, username, user_id)
         
-        # Save to DB
+        # Save to database
         try:
             save_card_result(user_id, cc, gate_name, amount, result['status_code'], result['response'], result['bin_info'])
         except:
             pass
         
-        # Update stats
+        # Update statistics
         stats['checked'] += 1
         sc = result['status_code']
         if sc == 'HIT':
@@ -353,6 +353,8 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
             stats['declined'] += 1
         elif sc == 'ERROR':
             stats['network_error'] += 1
+        elif sc in ['CCN', 'CVV']:
+            stats['declined'] += 1
         else:
             stats['declined'] += 1
         
@@ -363,10 +365,12 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
         empty = max(6 - filled, 0)
         bar = "▬" * filled + "▭" * empty
         
+        # Card display (masked)
         current_card = cc.split('|')
         card_display = f"{current_card[0][:6]}...{current_card[0][-4:]}|{current_card[1]}|{current_card[2]}|{current_card[3]}"
         
-        response_show = result['response'][:80]
+        # Show gate's actual status
+        status_show = result['status'][:80]
         
         progress_text = f"""<b>📂 FILE CHECK - LIVE</b>
 <b>━━━━━━━━━━━━━━━━━━━━━━</b>
@@ -375,8 +379,7 @@ def run_mass_check(chat_id, user_id, username, cards, gate_info, gate_key, refun
 
 <b>💳 Card:</b>
 <code>{card_display}</code>
-<b>📊 Status:</b> {result['icon']} <code>{result['status']}</code>
-<b>💬 Response:</b> <i>{response_show}</i>
+<b>📊 Status:</b> {result['icon']} <code>{status_show}</code>
 
 <b>┏━━━━━━━━━━━━━━━━━━━━┓</b>
 <b>┃ {bar} {progress_percent:.1f}%</b>
@@ -972,7 +975,6 @@ def handle_callbacks(call):
     elif call.data == "proxy_toggle":
         USE_PROXY = not USE_PROXY
         bot.answer_callback_query(call.id, f"{'🟢 ON' if USE_PROXY else '🔴 OFF'}")
-        # Update proxy menu
         count = proxy_manager.count_proxies()
         status = "🟢 ON" if USE_PROXY else "🔴 OFF"
         text = f"""<b>🌐 Proxy</b>
@@ -1049,7 +1051,6 @@ def handle_document(message):
             else:
                 bot.reply_to(message, "❌ No valid cards found!")
         else:
-            # No gate specified - show gate selection
             cards = extract_cards_from_text(text)
             if cards:
                 markup = types.InlineKeyboardMarkup(row_width=3)
