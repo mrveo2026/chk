@@ -16,7 +16,12 @@ from proxy_manager import proxy_manager
 from utils.card_utils import *
 from utils.response_classifier import classify_gate_response
 from utils.rate_limiter import mass_rate_limiter
+# bot.py အပေါ်ဆုံးမှာ ထည့်ပါ
+import sys
+import os
 
+# Add current directory to Python path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ==================== GATE IMPORTS ====================
 import importlib
 
